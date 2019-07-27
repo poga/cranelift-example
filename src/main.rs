@@ -2,10 +2,91 @@ use std::collections::HashMap;
 use std::mem;
 
 use cranelift::prelude::*;
-use cranelift_module::{Linkage, Module};
+use cranelift_module::{DataContext, Linkage, Module};
 use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
 
 fn main() {
+    add();
+    hello();
+}
+
+fn hello() {
+    let mut builder_context = FunctionBuilderContext::new();
+    let builder = SimpleJITBuilder::new(cranelift_module::default_libcall_names());
+    let mut module: Module<SimpleJITBackend> = Module::new(builder);
+    let mut ctx = module.make_context();
+    let mut data_ctx = DataContext::new();
+
+    // create data
+    data_ctx.define("hello world\0".as_bytes().to_vec().into_boxed_slice());
+    let data_id = module
+        .declare_data("hello_string", Linkage::Export, true, None)
+        .unwrap();
+    module.define_data(data_id, &data_ctx).unwrap();
+    data_ctx.clear();
+    module.finalize_definitions();
+
+    let int = module.target_config().pointer_type();
+    ctx.func.signature.returns.push(AbiParam::new(int));
+
+    let mut func_builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+    let entry_ebb = func_builder.create_ebb();
+    func_builder.append_ebb_params_for_function_params(entry_ebb);
+    func_builder.switch_to_block(entry_ebb);
+    func_builder.seal_block(entry_ebb);
+
+    let params: Vec<String> = vec![];
+    let the_return = "c".to_string();
+    let variables = declare_variables(int, &mut func_builder, &params, &the_return, entry_ebb);
+
+    // load data to symbol
+    let sym = module
+        .declare_data("hello_string", Linkage::Export, true, None)
+        .unwrap();
+    let sym_local_id = module.declare_data_in_func(sym, &mut func_builder.func);
+    let pointer = module.target_config().pointer_type();
+    let string_to_print = func_builder.ins().symbol_value(pointer, sym_local_id);
+
+    // call libc
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(int));
+    sig.returns.push(AbiParam::new(int));
+    let callee = module
+        .declare_function("puts", Linkage::Import, &sig)
+        .unwrap();
+    let local_callee = module.declare_func_in_func(callee, &mut func_builder.func);
+
+    let mut arg_values = Vec::new();
+    arg_values.push(string_to_print);
+
+    let call = func_builder.ins().call(local_callee, &arg_values);
+    func_builder.inst_results(call);
+
+    // make a default return value
+    let result = func_builder.ins().iconst(int, 0);
+    let var_c = variables.get("c").expect("variable c not defined");
+    func_builder.def_var(*var_c, result);
+
+    let return_var = variables.get(&the_return).unwrap();
+    let return_val = func_builder.use_var(*return_var);
+    func_builder.ins().return_(&[return_val]);
+    func_builder.finalize();
+
+    let id = module
+        .declare_function("test", Linkage::Export, &ctx.func.signature)
+        .map_err(|e| e.to_string())
+        .unwrap();
+
+    module.define_function(id, &mut ctx).unwrap();
+    module.clear_context(&mut ctx);
+    module.finalize_definitions();
+    let code = module.get_finalized_function(id);
+
+    let f = unsafe { mem::transmute::<_, fn() -> isize>(code) };
+    println!("result: {}", f());
+}
+
+fn add() {
     let mut builder_context = FunctionBuilderContext::new();
     let builder = SimpleJITBuilder::new(cranelift_module::default_libcall_names());
     let mut module: Module<SimpleJITBackend> = Module::new(builder);
