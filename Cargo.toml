@@ -1,0 +1,12 @@
+[package]
+name = "cranelift-try"
+version = "0.1.0"
+authors = ["Poga Po <poga.bahamut@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cranelift = "0.33.0"
+cranelift-module = "0.33.0"
+cranelift-simplejit = "0.33.0"
