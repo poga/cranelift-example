@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::mem;
 
+use cranelift::codegen::ir::DisplayFunctionAnnotations;
+use cranelift::codegen::write_function;
 use cranelift::prelude::*;
 use cranelift_module::{DataContext, Linkage, Module};
 use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
@@ -9,6 +11,7 @@ fn main() {
     add();
     hello();
     branch();
+    looper()
 }
 
 // func (a, b) {
@@ -81,10 +84,79 @@ fn branch() {
     let code = module.get_finalized_function(id);
 
     let f = unsafe { mem::transmute::<_, fn(isize, isize) -> isize>(code) };
-    println!("result: {}", f(1, 4));
+    println!("a != b ?: {}", f(0, 1));
 }
 
-fn looper() {}
+fn looper() {
+    let mut builder_context = FunctionBuilderContext::new();
+    let builder = SimpleJITBuilder::new(cranelift_module::default_libcall_names());
+    let mut module: Module<SimpleJITBackend> = Module::new(builder);
+    let mut ctx = module.make_context();
+
+    let int = module.target_config().pointer_type();
+    ctx.func.signature.params.push(AbiParam::new(int));
+    ctx.func.signature.returns.push(AbiParam::new(int));
+
+    let mut func_builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+    let entry_ebb = func_builder.create_ebb();
+    func_builder.append_ebb_params_for_function_params(entry_ebb);
+    func_builder.switch_to_block(entry_ebb);
+    func_builder.seal_block(entry_ebb);
+
+    let params: Vec<String> = vec!["a".to_string()];
+    let the_return = "c".to_string();
+    let variables = declare_variables(int, &mut func_builder, &params, &the_return, entry_ebb);
+
+    let header_block = func_builder.create_ebb();
+    let exit_block = func_builder.create_ebb();
+    func_builder.append_ebb_param(header_block, int);
+    func_builder.append_ebb_param(header_block, int);
+    func_builder.append_ebb_param(exit_block, int);
+
+    let var_a = variables.get("a").expect("variable a not defined");
+    let a = func_builder.use_var(*var_a);
+
+    let zero = func_builder.ins().iconst(int, 0);
+    let one = func_builder.ins().iconst(int, 1);
+
+    func_builder.ins().jump(header_block, &[a, a]);
+    func_builder.switch_to_block(header_block);
+
+    let mul = func_builder.ebb_params(header_block)[0];
+    let a = func_builder.ebb_params(header_block)[1];
+    let next_a = func_builder.ins().isub(a, one);
+    let condition_val = func_builder.ins().icmp(IntCC::Equal, next_a, zero);
+    func_builder.ins().brnz(condition_val, exit_block, &[mul]);
+    let mul = func_builder.ins().imul(mul, next_a);
+    func_builder.ins().jump(header_block, &[mul, next_a]);
+
+    func_builder.switch_to_block(exit_block);
+    func_builder.seal_block(header_block);
+    func_builder.seal_block(exit_block);
+
+    let return_val = func_builder.ebb_params(exit_block)[0];
+    let var_c = variables.get("c").expect("variable c not defined");
+    func_builder.def_var(*var_c, return_val);
+    func_builder.ins().return_(&[return_val]);
+    func_builder.finalize();
+
+    let id = module
+        .declare_function("test", Linkage::Export, &ctx.func.signature)
+        .map_err(|e| e.to_string())
+        .unwrap();
+
+    module.define_function(id, &mut ctx).unwrap();
+    // let mut buf = String::new();
+    // write_function(&mut buf, &ctx.func, &DisplayFunctionAnnotations::default()).unwrap();
+    // println!("{}", buf);
+    module.clear_context(&mut ctx);
+    module.finalize_definitions();
+    let code = module.get_finalized_function(id);
+
+    let f = unsafe { mem::transmute::<_, fn(isize) -> isize>(code) };
+    let p = 5;
+    println!("{}!= {}", p, f(p));
+}
 
 // func () {
 //     puts("hello world")
