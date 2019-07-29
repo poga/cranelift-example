@@ -8,8 +8,87 @@ use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
 fn main() {
     add();
     hello();
+    branch();
 }
 
+// func (a, b) {
+//    if (a == b) return 0
+//    return 1
+// }
+fn branch() {
+    let mut builder_context = FunctionBuilderContext::new();
+    let builder = SimpleJITBuilder::new(cranelift_module::default_libcall_names());
+    let mut module: Module<SimpleJITBackend> = Module::new(builder);
+    let mut ctx = module.make_context();
+
+    let int = module.target_config().pointer_type();
+    ctx.func.signature.params.push(AbiParam::new(int));
+    ctx.func.signature.params.push(AbiParam::new(int));
+    ctx.func.signature.returns.push(AbiParam::new(int));
+
+    let mut func_builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+    let entry_ebb = func_builder.create_ebb();
+    func_builder.append_ebb_params_for_function_params(entry_ebb);
+    func_builder.switch_to_block(entry_ebb);
+    func_builder.seal_block(entry_ebb);
+
+    let params: Vec<String> = vec!["a".to_string(), "b".to_string()];
+    let the_return = "c".to_string();
+    let variables = declare_variables(int, &mut func_builder, &params, &the_return, entry_ebb);
+
+    let var_a = variables.get("a").expect("variable a not defined");
+    let a = func_builder.use_var(*var_a);
+    let var_b = variables.get("b").expect("variable b not defined");
+    let b = func_builder.use_var(*var_b);
+
+    let condition_val = func_builder.ins().icmp(IntCC::Equal, a, b);
+
+    let else_block = func_builder.create_ebb();
+    let merge_block = func_builder.create_ebb();
+    func_builder.append_ebb_param(merge_block, int);
+    func_builder.ins().brz(condition_val, else_block, &[]);
+
+    let then_return = func_builder.ins().iconst(int, 0);
+    func_builder.ins().jump(merge_block, &[then_return]);
+
+    func_builder.switch_to_block(else_block);
+    func_builder.seal_block(else_block);
+    let else_return = func_builder.ins().iconst(int, 1);
+    func_builder.ins().jump(merge_block, &[else_return]);
+
+    func_builder.switch_to_block(merge_block);
+    func_builder.seal_block(merge_block);
+
+    let phi = func_builder.ebb_params(merge_block)[0];
+
+    let result = phi;
+    let var_c = variables.get("c").expect("variable c not defined");
+    func_builder.def_var(*var_c, result);
+
+    let return_var = variables.get(&the_return).unwrap();
+    let return_val = func_builder.use_var(*return_var);
+    func_builder.ins().return_(&[return_val]);
+    func_builder.finalize();
+
+    let id = module
+        .declare_function("test", Linkage::Export, &ctx.func.signature)
+        .map_err(|e| e.to_string())
+        .unwrap();
+
+    module.define_function(id, &mut ctx).unwrap();
+    module.clear_context(&mut ctx);
+    module.finalize_definitions();
+    let code = module.get_finalized_function(id);
+
+    let f = unsafe { mem::transmute::<_, fn(isize, isize) -> isize>(code) };
+    println!("result: {}", f(1, 4));
+}
+
+fn looper() {}
+
+// func () {
+//     puts("hello world")
+// }
 fn hello() {
     let mut builder_context = FunctionBuilderContext::new();
     let builder = SimpleJITBuilder::new(cranelift_module::default_libcall_names());
@@ -86,6 +165,9 @@ fn hello() {
     println!("result: {}", f());
 }
 
+// func (a, b) {
+//     return a + b
+// }
 fn add() {
     let mut builder_context = FunctionBuilderContext::new();
     let builder = SimpleJITBuilder::new(cranelift_module::default_libcall_names());
@@ -107,9 +189,9 @@ fn add() {
     let the_return = "c".to_string();
     let variables = declare_variables(int, &mut func_builder, &params, &the_return, entry_ebb);
 
-    let var_a = variables.get("a").expect("variable a not efined");
+    let var_a = variables.get("a").expect("variable a not defined");
     let a = func_builder.use_var(*var_a);
-    let var_b = variables.get("b").expect("variable b not efined");
+    let var_b = variables.get("b").expect("variable b not defined");
     let b = func_builder.use_var(*var_b);
 
     let result = func_builder.ins().iadd(a, b);
